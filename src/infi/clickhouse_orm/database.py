@@ -4,7 +4,7 @@ import re
 import requests
 from collections import namedtuple
 from .models import ModelBase
-from .utils import escape, parse_tsv, import_submodules
+from .utils import escape, parse_tsv, import_submodules, on_cluster
 from math import ceil
 import datetime
 from string import Template
@@ -14,7 +14,8 @@ import logging
 logger = logging.getLogger('clickhouse_orm')
 
 
-Page = namedtuple('Page', 'objects number_of_objects pages_total number page_size')
+Page = namedtuple(
+    'Page', 'objects number_of_objects pages_total number page_size')
 
 
 class DatabaseException(Exception):
@@ -28,6 +29,7 @@ class ServerError(DatabaseException):
     """
     Raised when a server returns an error.
     """
+
     def __init__(self, message):
         self.code = None
         processed = self.get_error_code_msg(message)
@@ -110,18 +112,20 @@ class Database(object):
             self.request_session.auth = (username, password or '')
         self.log_statements = log_statements
         self.settings = {}
-        self.db_exists = False # this is required before running _is_existing_database
+        self.db_exists = False  # this is required before running _is_existing_database
         self.db_exists = self._is_existing_database()
         if readonly:
             if not self.db_exists:
-                raise DatabaseException('Database does not exist, and cannot be created under readonly connection')
+                raise DatabaseException(
+                    'Database does not exist, and cannot be created under readonly connection')
             self.connection_readonly = self._is_connection_readonly()
             self.readonly = True
         elif autocreate and not self.db_exists:
             self.create_database()
         self.server_version = self._get_server_version()
         # Versions 1.1.53981 and below don't have timezone function
-        self.server_timezone = self._get_server_timezone() if self.server_version > (1, 1, 53981) else pytz.utc
+        self.server_timezone = self._get_server_timezone(
+        ) if self.server_version > (1, 1, 53981) else pytz.utc
         # Versions 19.1.16 and above support codec compression
         self.has_codec_support = self.server_version >= (19, 1, 16)
         # Version 19.0 and above support LowCardinality
@@ -131,14 +135,16 @@ class Database(object):
         '''
         Creates the database on the ClickHouse server if it does not already exist.
         '''
-        self._send('CREATE DATABASE IF NOT EXISTS `%s`' % self.db_name)
+        self._send('CREATE DATABASE IF NOT EXISTS `%s` %s' %
+                   (self.db_name, on_cluster(self)))
         self.db_exists = True
 
     def drop_database(self):
         '''
         Deletes the database on the ClickHouse server.
         '''
-        self._send('DROP DATABASE `%s`' % self.db_name)
+        self._send('DROP DATABASE `%s` %s' %
+                   (self.db_name, on_cluster(self)))
         self.db_exists = False
 
     def create_table(self, model_class):
@@ -148,7 +154,8 @@ class Database(object):
         if model_class.is_system_model():
             raise DatabaseException("You can't create system table")
         if getattr(model_class, 'engine') is None:
-            raise DatabaseException("%s class must define an engine" % model_class.__name__)
+            raise DatabaseException(
+                "%s class must define an engine" % model_class.__name__)
         self._send(model_class.create_table_sql(self))
 
     def drop_table(self, model_class):
@@ -216,7 +223,8 @@ class Database(object):
         model_class = first_instance.__class__
 
         if first_instance.is_read_only() or first_instance.is_system_model():
-            raise DatabaseException("You can't insert into read only and system tables")
+            raise DatabaseException(
+                "You can't insert into read only and system tables")
 
         fields_list = ','.join(
             ['`%s`' % name for name in first_instance.fields(writable=True)])
@@ -277,7 +285,8 @@ class Database(object):
         lines = r.iter_lines()
         field_names = parse_tsv(next(lines))
         field_types = parse_tsv(next(lines))
-        model_class = model_class or ModelBase.create_ad_hoc_model(zip(field_names, field_types))
+        model_class = model_class or ModelBase.create_ad_hoc_model(
+            zip(field_names, field_types))
         for line in lines:
             # skip blank line left by WITH TOTALS modifier
             if line:
@@ -326,7 +335,8 @@ class Database(object):
         query += ' LIMIT %d, %d' % (offset, page_size)
         query = self._substitute(query, model_class)
         return Page(
-            objects=list(self.select(query, model_class, settings)) if count else [],
+            objects=list(self.select(query, model_class, settings)
+                         ) if count else [],
             number_of_objects=count,
             pages_total=pages_total,
             number=page_num,
@@ -343,14 +353,16 @@ class Database(object):
         '''
         from .migrations import MigrationHistory
         logger = logging.getLogger('migrations')
-        applied_migrations = self._get_applied_migrations_and_create_tables(migrations_package_name, replicated=replicated)
+        applied_migrations = self._get_applied_migrations_and_create_tables(
+            migrations_package_name, replicated=replicated)
         modules = import_submodules(migrations_package_name)
         unapplied_migrations = set(modules.keys()) - applied_migrations
         for name in sorted(unapplied_migrations):
             logger.info('Applying migration %s...', name)
             for operation in modules[name].operations:
                 operation.apply(self)
-            self.insert([MigrationHistory(package_name=migrations_package_name, module_name=name, applied=datetime.date.today())])
+            self.insert([MigrationHistory(package_name=migrations_package_name,
+                        module_name=name, applied=datetime.date.today())])
             if int(name[:4]) >= up_to:
                 break
 
@@ -370,11 +382,11 @@ class Database(object):
 
             return self._get_applied_migrations_and_create_tables(migrations_package_name, replicated, allow_missing_tables=False)
 
-
     def _get_applied_migrations(self, migrations_package_name, replicated):
         from .migrations import MigrationHistory, MigrationHistoryDistributed
         query = "SELECT DISTINCT module_name FROM $table WHERE package_name = '%s'" % migrations_package_name
-        query = self._substitute(query, MigrationHistoryDistributed if replicated else MigrationHistory)
+        query = self._substitute(
+            query, MigrationHistoryDistributed if replicated else MigrationHistory)
 
         return set(obj.module_name for obj in self.select(query))
 
@@ -384,7 +396,8 @@ class Database(object):
             if self.log_statements:
                 logger.info(data)
         params = self._build_params(settings)
-        r = self.request_session.post(self.db_url, params=params, data=data, stream=stream, timeout=self.timeout)
+        r = self.request_session.post(
+            self.db_url, params=params, data=data, stream=stream, timeout=self.timeout)
         if r.status_code != 200:
             raise ServerError(r.text)
         return r
@@ -409,7 +422,8 @@ class Database(object):
                 if model_class.is_system_model():
                     mapping['table'] = "`system`.`%s`" % model_class.table_name()
                 else:
-                    mapping['table'] = "`%s`.`%s`" % (self.db_name, model_class.table_name())
+                    mapping['table'] = "`%s`.`%s`" % (
+                        self.db_name, model_class.table_name())
             query = Template(query).safe_substitute(mapping)
         return query
 
@@ -418,7 +432,8 @@ class Database(object):
             r = self._send('SELECT timezone()')
             return pytz.timezone(r.text.strip())
         except ServerError as e:
-            logger.exception('Cannot determine server timezone (%s), assuming UTC', e)
+            logger.exception(
+                'Cannot determine server timezone (%s), assuming UTC', e)
             return pytz.utc
 
     def _get_server_version(self, as_tuple=True):
@@ -426,20 +441,24 @@ class Database(object):
             r = self._send('SELECT version();')
             ver = r.text
         except ServerError as e:
-            logger.exception('Cannot determine server version (%s), assuming 1.1.0', e)
+            logger.exception(
+                'Cannot determine server version (%s), assuming 1.1.0', e)
             ver = '1.1.0'
         # :TRICKY: Altinity cloud uses a non-numeric suffix for the version, which this removes.
         ver = re.sub(r"[.\D]+$", '', ver)
         return tuple(int(n) for n in ver.split('.')) if as_tuple else ver
 
     def _is_existing_database(self):
-        r = self._send("SELECT count() FROM system.databases WHERE name = '%s'" % self.db_name)
+        r = self._send(
+            "SELECT count() FROM system.databases WHERE name = '%s'" % self.db_name)
         return r.text.strip() == '1'
 
     def _is_connection_readonly(self):
-        r = self._send("SELECT value FROM system.settings WHERE name = 'readonly'")
+        r = self._send(
+            "SELECT value FROM system.settings WHERE name = 'readonly'")
         return r.text.strip() != '0'
 
 
 # Expose only relevant classes in import *
-__all__ = [c.__name__ for c in [Page, DatabaseException, ServerError, Database]]
+__all__ = [c.__name__ for c in [
+    Page, DatabaseException, ServerError, Database]]
